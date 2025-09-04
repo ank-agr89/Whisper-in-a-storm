@@ -7,20 +7,19 @@ Original file is located at
     https://colab.research.google.com/drive/1c3novEN96wKkS9OVnq-hN3aXD4TFojXt
 """
 
-# Update the LaTeX with numbered equations and regenerate the final spectrogram
-# using whitening + median-subtraction, longer STFT window with high overlap, and
-# contrast-stretching via percentile clipping.
-
-import os, textwrap, numpy as np, pandas as pd
+# --- Toy LIGO-style matched filtering: Colab-safe build (no caas_jupyter_tools) ---
+import os, textwrap
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import chirp, correlate, welch, stft
 from scipy.stats import norm
 
-# --- Ensure output dir exists (portable for Colab/locals) ---
+# 0) Output folder
 out_dir = "./"
 os.makedirs(out_dir, exist_ok=True)
 
-# --- Recreate the synthetic dataset (same seed for stability) ---
+# 1) Synthetic data
 np.random.seed(42)
 fs = 4096.0
 duration = 1.0
@@ -36,65 +35,88 @@ true_signal = signal_amplitude * template
 noise = noise_std * np.random.randn(len(t))
 data = true_signal + noise
 
-# --- Whiten the time series (Welch PSD estimate + frequency-domain whitening) ---
+# 2) Figures: time series, matched-filter, residuals
+plt.figure(figsize=(10,4))
+plt.plot(t, data, label="Noisy data")
+plt.plot(t, true_signal, label="Injected signal", alpha=0.8)
+plt.xlabel("Time (s)"); plt.ylabel("Strain (arb. units)")
+plt.title("Noisy data with injected gravitational-wave-like signal")
+plt.legend(); plt.tight_layout()
+plt.savefig(os.path.join(out_dir, "fig1_timeseries.png"), dpi=200); plt.close()
+
+corr = correlate(data, template, mode='same')
+max_idx = int(np.argmax(corr))
+estimated_time = t[max_idx]
+snr = corr[max_idx] / np.std(corr)
+
+plt.figure(figsize=(10,4))
+plt.plot(t, corr, label="Matched filter output")
+plt.axvline(estimated_time, linestyle="--", label="Estimated signal time")
+plt.xlabel("Time (s)"); plt.ylabel("Correlation (arb. units)")
+plt.title("Matched filter output (cross-correlation)")
+plt.legend(); plt.tight_layout()
+plt.savefig(os.path.join(out_dir, "fig2_correlation.png"), dpi=200); plt.close()
+
+residual = data - true_signal
+mu_hat, sigma_hat = float(np.mean(residual)), float(np.std(residual))
+plt.figure(figsize=(10,4))
+plt.hist(residual, bins=60, density=True, alpha=0.7, label="Residual histogram")
+x = np.linspace(residual.min(), residual.max(), 400)
+plt.plot(x, norm.pdf(x, mu_hat, sigma_hat), label=f"Gaussian fit (μ={mu_hat:.3f}, σ={sigma_hat:.3f})")
+plt.xlabel("Residual amplitude"); plt.ylabel("Density")
+plt.title("Residuals distribution and Gaussian fit")
+plt.legend(); plt.tight_layout()
+plt.savefig(os.path.join(out_dir, "fig3_residual_hist.png"), dpi=200); plt.close()
+
+# 3) Whiten + median-subtracted STFT, long window, high overlap, contrast clipped
 def whiten_time_series(x, fs, nperseg=1024):
-    # Welch PSD
-    freqs_psd, psd = welch(x, fs=fs, nperseg=nperseg)
-    # Avoid zero PSD
+    f_psd, psd = welch(x, fs=fs, nperseg=nperseg)
     psd = np.maximum(psd, 1e-12)
-    # FFT of the time series
     X = np.fft.rfft(x)
-    freqs_fft = np.fft.rfftfreq(len(x), d=1.0/fs)
-    # Interpolate ASD (sqrt(PSD)) onto FFT bins
-    asd = np.sqrt(np.interp(freqs_fft, freqs_psd, psd))
+    f_fft = np.fft.rfftfreq(len(x), d=1.0/fs)
+    asd = np.sqrt(np.interp(f_fft, f_psd, psd))
     asd = np.maximum(asd, 1e-12)
-    # Whiten in freq domain and return to time domain
-    Xw = X / asd
-    xw = np.fft.irfft(Xw, n=len(x))
-    return xw
+    return np.fft.irfft(X / asd, n=len(x))
 
 whitened = whiten_time_series(data, fs=fs, nperseg=1024)
-
-# --- Matched filter on whitened data (toy) (optional diagnostic) ---
-correlation_w = correlate(whitened, template, mode='same')
-max_idx = int(np.argmax(correlation_w))
-estimated_time = t[max_idx]
-snr = correlation_w[max_idx] / np.std(correlation_w)
-
-# --- STFT with longer window + high overlap ---
-# Use a longer window to reduce variance; high overlap (~90%)
-nperseg = 1024  # longer than default 256; could also try 2048 on longer data
-noverlap = int(0.9 * nperseg)
-win = 'hann'
-f_stft, tau_stft, Zxx = stft(whitened, fs=fs, window=win, nperseg=nperseg, noverlap=noverlap, nfft=nperseg, boundary=None)
-
-# Power spectrogram (magnitude squared), convert to dB
+f_stft, tau_stft, Zxx = stft(
+    whitened, fs=fs, window='hann',
+    nperseg=1024, noverlap=int(0.9*1024), nfft=1024, boundary=None
+)
 Sxx = np.abs(Zxx)**2
-Sxx_db = 10.0 * np.log10(Sxx + 1e-12)
+Sxx_db = 10*np.log10(Sxx + 1e-12)
+Sxx_db_ms = Sxx_db - np.median(Sxx_db, axis=1, keepdims=True)
 
-# --- Median subtraction across time for each frequency bin ---
-median_over_time = np.median(Sxx_db, axis=1, keepdims=True)
-Sxx_db_ms = Sxx_db - median_over_time
-
-# --- Contrast stretch: clip color limits to 95–99.5th percentile ---
-lower = np.percentile(Sxx_db_ms, 95.0)
-upper = np.percentile(Sxx_db_ms, 99.5)
-
-# --- Plot the improved spectrogram ---
-plt.figure(figsize=(10, 4))
-# Use pcolormesh for correct axes; do not specify colors explicitly
-# tau_stft (time), f_stft (frequency)
-plt.pcolormesh(tau_stft, f_stft, Sxx_db_ms, shading='gouraud', vmin=lower, vmax=upper)
-plt.xlabel("Time (s)")
-plt.ylabel("Frequency (Hz)")
+lo, hi = np.percentile(Sxx_db_ms, 95.0), np.percentile(Sxx_db_ms, 99.5)
+plt.figure(figsize=(10,4))
+plt.pcolormesh(tau_stft, f_stft, Sxx_db_ms, shading='gouraud', vmin=lo, vmax=hi)
+plt.xlabel("Time (s)"); plt.ylabel("Frequency (Hz)")
 plt.title("Whitened, median-subtracted spectrogram (long window, high overlap)")
 plt.tight_layout()
-spec_path = os.path.join(out_dir, "fig4_spectrogram.png")  # overwrite the original
-plt.savefig(spec_path, dpi=200)
-plt.close()
+plt.savefig(os.path.join(out_dir, "fig4_spectrogram.png"), dpi=200); plt.close()
 
-# --- Update LaTeX: add numbered equations and references, and mention the improved plot ---
-tex_content = r"""
+# 4) parameters.tex and CSV
+params = [
+    ("Sampling rate", f"{fs:.0f} Hz"),
+    ("Duration", f"{duration:.2f} s"),
+    ("Chirp start frequency", f"{f0:.1f} Hz"),
+    ("Chirp end frequency", f"{f1:.1f} Hz"),
+    ("Signal amplitude", f"{signal_amplitude:.2f}"),
+    ("Noise std. dev.", f"{noise_std:.2f}"),
+    ("Estimated arrival time", f"{estimated_time:.4f} s"),
+    ("Approx. SNR (toy)", f"{snr:.2f}"),
+    ("Residual μ, σ", f"{mu_hat:.3f}, {sigma_hat:.3f}"),
+]
+params_tex = "\\begin{tabular}{ll}\n\\toprule\nParameter & Value \\\\\n\\midrule\n"
+for k, v in params: params_tex += f"{k} & {v} \\\\\n"
+params_tex += "\\bottomrule\n\\end{tabular}\n"
+open(os.path.join(out_dir, "parameters.tex"), "w").write(params_tex)
+
+pd.DataFrame({"time_s": t, "data": data, "injected_signal": true_signal, "template": template}) \
+  .to_csv(os.path.join(out_dir, "timeseries.csv"), index=False)
+
+# 5) LaTeX (modest title + numbered equations + spec description)
+tex = r"""
 \documentclass[11pt,a4paper]{article}
 \usepackage[margin=1.1in]{geometry}
 \usepackage{amsmath, amssymb, amsthm}
@@ -110,7 +132,7 @@ tex_content = r"""
 \usepackage{xcolor}
 
 \hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
-\title{Finding a Whisper in a Storm: An Intuitive, Yet Exact, Walkthrough of LIGO-Style Matched Filtering}
+\title{Finding a Whisper in a Storm: An Intuitive Walkthrough of LIGO-Style Matched Filtering}
 \author{}
 \date{\today}
 
@@ -118,11 +140,8 @@ tex_content = r"""
 \maketitle
 
 \begin{abstract}
-Gravitational waves are faint ripples in spacetime, so faint that even the most sensitive instruments see mostly noise. This document tells the story of how data analysis---especially matched filtering---turns noisy strain measurements into confident detections. We build a minimal, reproducible ``toy detector'': a synthetic chirp signal hidden inside random noise. We then recover it using the very idea at the heart of LIGO's searches. The goal is not to recite names and dates, but to \emph{understand why} the method works, what ``Gaussian'' really means for noise, and how the whole pipeline hangs together from intuition to result.
+Gravitational waves are faint ripples in spacetime, so faint that even the most sensitive instruments see mostly noise. This document tells the story of how data analysis---especially matched filtering---turns noisy strain measurements into confident detections. We build a minimal, reproducible ``toy detector'': a synthetic chirp hidden inside random noise. We then recover it using the core idea of LIGO's searches, with clear intuition about ``Gaussian'' noise and why correlation is the right question to ask of the data.
 \end{abstract}
-
-\section{The Problem: Hearing a Pattern You Expect}
-Imagine a melody played once in a noisy room. If you know the melody in advance, you can ``listen for it.'' Matched filtering formalizes this idea. We assume we know the general shape of the signal we seek (a template); we slide that template across the data and measure how well they line up at every time. Where alignment is best, the template ``rings,'' producing a peak in a detection statistic.
 
 \section{Generative Model and Hypotheses}
 We model the observed strain $d(t)$ as either noise alone or noise plus a signal:
@@ -130,99 +149,71 @@ We model the observed strain $d(t)$ as either noise alone or noise plus a signal
 \mathcal{H}_0:~ d(t) &= n(t), \label{eq:h0}\\
 \mathcal{H}_1:~ d(t) &= h(t) + n(t), \label{eq:h1}
 \end{align}
-where $n(t)$ is a (roughly) stationary random process and $h(t)$ is a deterministic pattern predicted by physics (our template).
+where $n(t)$ is a (roughly) stationary random process and $h(t)$ is a deterministic template.
 
-If the noise is (approximately) Gaussian, then the likelihood ratio between $\mathcal{H}_1$ and $\mathcal{H}_0$ can be expressed in terms of a noise-weighted inner product. In continuous frequency language, define
+If the noise is (approximately) Gaussian, the likelihood ratio can be expressed with the noise-weighted inner product:
 \begin{equation}
 (a|b) \equiv 4\,\Re \int_{0}^{\infty} \frac{\tilde a(f)\,\tilde b^{*}(f)}{S_n(f)}\,\mathrm{d}f, \label{eq:inner}
 \end{equation}
-where tildes denote Fourier transforms and $S_n(f)$ is the (one-sided) noise power spectral density (PSD).
+where tildes denote Fourier transforms and $S_n(f)$ is the one-sided PSD.
 
 \section{Matched Filtering and SNR}
-For a template $h$ (allowing a relative time shift $\tau$), the matched-filter signal-to-noise ratio (SNR) time series is
+For a template $h$ with relative time shift $\tau$, the SNR time series is
 \begin{equation}
 \rho(\tau) \equiv \frac{(d | h_\tau)}{\sqrt{(h|h)}}, \qquad
 h_\tau(t) \equiv h(t-\tau). \label{eq:snr}
 \end{equation}
-Peaks of $\rho(\tau)$ indicate times where $d$ contains $h$ most strongly, with the weighting in \eqref{eq:inner} downweighting frequencies where the detector is noisier.
-
-\section{What ``Gaussian Noise'' Really Means}
-``Gaussian'' is about a \emph{shape} that randomness tends to take. A process is Gaussian when any linear combination of samples is normally distributed; empirically, histograms of noise-only samples form a bell-shaped curve. In practice, this means averages and correlations are predictable: the central limit effect makes extreme fluctuations rare and typical fluctuations well-characterized by a mean and standard deviation.
+Peaks of $\rho(\tau)$ indicate times where $d$ contains $h$ most strongly, with \eqref{eq:inner} downweighting noisy bands.
 
 \section{Whitening and Spectrograms}
-To make features visually apparent and to approximate the weighting in \eqref{eq:inner}, we \emph{whiten} the data: we estimate $S_n(f)$ and flatten the spectrum via
+To visualize features and approximate the weighting in \eqref{eq:inner}, we whiten the data:
 \begin{equation}
 \tilde x_{\mathrm{w}}(f) \equiv \frac{\tilde x(f)}{\sqrt{S_n(f)}}, \qquad
-x_{\mathrm{w}}(t) = \mathcal{F}^{-1}\!\big[\tilde x_{\mathrm{w}}(f)\big], \label{eq:whiten}
+x_{\mathrm{w}}(t) = \mathcal{F}^{-1}\!\big[\tilde x_{\mathrm{w}}(f)\big]. \label{eq:whiten}
 \end{equation}
-where $\mathcal{F}^{-1}$ is the inverse Fourier transform. We then compute a short-time Fourier transform (STFT),
+We then compute an STFT with a long window and high overlap:
 \begin{equation}
 Z(t_k,f_m) \equiv \sum_{t} x_{\mathrm{w}}(t)\,w(t-t_k)\,e^{-i2\pi f_m t}, \label{eq:stft}
 \end{equation}
-with a long window and high overlap to reduce variance. We visualize $10\log_{10}|Z|^2$ after subtracting, for each frequency $f_m$, the median over $t_k$ (this removes stationary backgrounds):
+and plot $10\log_{10}|Z|^2$ after subtracting, for each $f_m$, the median over $t_k$:
 \begin{equation}
-S_{\mathrm{dB}}^{\mathrm{ms}}(t_k,f_m) \equiv 10\log_{10}\!\big(|Z(t_k,f_m)|^2\big)
-~ - ~ \mathrm{median}_{t_k}\!\left[\,10\log_{10}\!\big(|Z(t_k,f_m)|^2\big)\,\right]. \label{eq:medsub}
+S_{\mathrm{dB}}^{\mathrm{ms}}(t_k,f_m) \equiv 10\log_{10}\!\big(|Z|^2\big)
+~ - ~ \mathrm{median}_{t_k}\!\left[\,10\log_{10}\!\big(|Z|^2\big)\,\right]. \label{eq:medsub}
 \end{equation}
-Finally, we apply a contrast stretch by clipping the color scale to the $95$th--$99.5$th percentiles of $S_{\mathrm{dB}}^{\mathrm{ms}}$ before plotting. This emphasizes the faint, time-varying structure of the chirp.
+Finally, we clip color limits to the $95$th--$99.5$th percentiles of $S_{\mathrm{dB}}^{\mathrm{ms}}$ to enhance contrast.
 
-\section{Doing It: From Data to Detection}
-We compute the (toy) matched filter output and identify the peak as the estimated arrival time, while the whitened, median-subtracted spectrogram highlights the rising-frequency pattern of the hidden chirp.
+\section{Figures}
+\begin{figure}[h!]\centering
+\includegraphics[width=0.95\linewidth]{fig1_timeseries.png}
+\caption{Noisy data with injected chirp (unit-energy template scaled by an amplitude) overlaid.}
+\end{figure}
 
-\begin{figure}[h!]
-\centering
+\begin{figure}[h!]\centering
 \includegraphics[width=0.95\linewidth]{fig2_correlation.png}
-\caption{Matched-filter output (correlation) vs.\ time. The dashed line marks the peak, which estimates the signal arrival time.}
-\label{fig:corr}
+\caption{Matched-filter output (toy correlation) vs.\ time. The dashed line marks the peak (estimated arrival time).}
 \end{figure}
 
-\begin{figure}[h!]
-\centering
+\begin{figure}[h!]\centering
+\includegraphics[width=0.95\linewidth]{fig3_residual_hist.png}
+\caption{Residual histogram with Gaussian fit. This is the operational meaning of ``Gaussian'': a bell-shaped distribution with predictable tails.}
+\end{figure}
+
+\begin{figure}[h!]\centering
 \includegraphics[width=0.95\linewidth]{fig4_spectrogram.png}
-\caption{Whitened, median-subtracted spectrogram computed with a long Hann window and 90\% overlap. The color limits are clipped to the 95th--99.5th percentiles to reduce variance and enhance contrast.}
-\label{fig:spec}
+\caption{Whitened, median-subtracted spectrogram using a long Hann window with 90\% overlap; color limits clipped to the 95th--99.5th percentiles.}
 \end{figure}
-
-\section{From Toy to Observatory: What We Simplified}
-Our toy omits engineering details: robust PSD tracking, whitening of very long records, banks of many templates, coherence across detectors, and false-alarm estimation via time shifts. The core ideas, however, remain those expressed by Eqs.~\eqref{eq:h0}--\eqref{eq:stft}.
 
 \appendix
-\section*{Appendix A: Parameters}
-\noindent The experiment parameters used in the figures are collected in Table~\ref{tab:params}.
-\begin{table}[h!]
-\centering
+\section*{Parameters}
+\noindent Table~\ref{tab:params} lists the parameters used in the experiment.
+\begin{table}[h!]\centering
 \caption{Parameters of the toy experiment.}
 \label{tab:params}
 \input{parameters.tex}
 \end{table}
 
-\section*{Appendix B: Reproducibility Notes}
-Upload this \LaTeX{} file with the images and \texttt{parameters.tex} to Overleaf. The Python code that generated the figures is available separately.
-
 \end{document}
 """
+open(os.path.join(out_dir, "ligo_toy_matched_filter.tex"), "w").write(tex)
 
-tex_path = os.path.join(out_dir, "ligo_toy_matched_filter.tex")
-with open(tex_path, "w") as f:
-    f.write(tex_content)
-
-# Also (re)write parameters table for completeness if missing
-params = [
-    ("Sampling rate", f"{fs:.0f} Hz"),
-    ("Duration", f"{duration:.2f} s"),
-    ("Chirp start frequency", f"{f0:.1f} Hz"),
-    ("Chirp end frequency", f"{f1:.1f} Hz"),
-    ("Signal amplitude", f"{signal_amplitude:.2f}"),
-    ("Noise std. dev.", f"{noise_std:.2f}"),
-    ("Estimated arrival time", f"{estimated_time:.4f} s"),
-    ("Approx. SNR (toy, whitened)", f"{snr:.2f}"),
-]
-params_tex = "\\begin{tabular}{ll}\n\\toprule\nParameter & Value \\\\\n\\midrule\n"
-for k, v in params:
-    params_tex += f"{k} & {v} \\\\\n"
-params_tex += "\\bottomrule\n\\end{tabular}\n"
-with open(os.path.join(out_dir, "parameters.tex"), "w") as f:
-    f.write(params_tex)
-
-print("Updated LaTeX", os.path.abspath(out_dir))
-print("Files now present:", sorted(os.listdir(out_dir)))
+print("Done. Upload the contents of ./outputs to Overleaf.")
