@@ -25,6 +25,15 @@
 Gravitational waves are faint ripples in spacetime, so faint that even the most sensitive instruments see mostly noise. This document tells the story of how data analysis---especially matched filtering---turns noisy strain measurements into confident detections. We build a minimal, reproducible ``toy detector'': a synthetic chirp hidden inside random noise. We then recover it using the core idea of LIGO's searches, with clear intuition about ``Gaussian'' noise and why correlation is the right question to ask of the data.
 \end{abstract}
 
+\section{The Problem: Hearing a Pattern You Expect}
+Imagine a melody played once in a noisy room. If you know the melody in advance, you can ``listen for it.'' Matched filtering formalizes this idea. We assume we know the general shape of the signal we seek (a template); we slide that template across the data and measure how well they line up at every time. Where alignment is best, the template ``rings,'' producing a peak in a detection statistic.
+
+\begin{figure}[h!]\centering
+\includegraphics[width=0.95\linewidth]{fig1_signal_vs_noise.png}
+\caption{Signal-only, noise-only, and signal+noise, over the same time span. Seeing all three clarifies the challenge: the signal is faint and structured, the noise is random, and real data are their sum.}
+\label{fig:signalvnoise}
+\end{figure}
+
 \section{Generative Model and Hypotheses}
 We model the observed strain $d(t)$ as either noise alone or noise plus a signal:
 \begin{align}
@@ -47,6 +56,21 @@ h_\tau(t) \equiv h(t-\tau). \label{eq:snr}
 \end{equation}
 Peaks of $\rho(\tau)$ indicate times where $d$ contains $h$ most strongly, with \eqref{eq:inner} downweighting noisy bands.
 
+\begin{figure}[h!]\centering
+\includegraphics[width=0.95\linewidth]{fig2_correlation.png}
+\caption{Matched-filter output (toy correlation) vs.\ time. The dashed line marks the peak (estimated arrival time).}
+\label{fig:corr}
+\end{figure}
+
+\section{What ``Gaussian Noise'' Really Means}
+``Gaussian'' is about a \emph{shape} that randomness tends to take. A process is Gaussian when any linear combination of samples is normally distributed; empirically, histograms of noise-only samples form a bell-shaped curve. In practice, this means averages and correlations are predictable: the central limit effect makes extreme fluctuations rare and typical fluctuations well-characterized by a mean and standard deviation.
+
+\begin{figure}[h!]\centering
+\includegraphics[width=0.95\linewidth]{fig3_residual_hist.png}
+\caption{Residual histogram with Gaussian fit. This is the operational meaning of ``Gaussian'': a bell-shaped distribution with predictable tails.}
+\label{fig:hist}
+\end{figure}
+
 \section{Whitening and Spectrograms}
 To visualize features and approximate the weighting in \eqref{eq:inner}, we whiten the data:
 \begin{equation}
@@ -64,34 +88,28 @@ S_{\mathrm{dB}}^{\mathrm{ms}}(t_k,f_m) \equiv 10\log_{10}\!\big(|Z|^2\big)
 \end{equation}
 Finally, we clip color limits to the $95$th--$99.5$th percentiles of $S_{\mathrm{dB}}^{\mathrm{ms}}$ to enhance contrast.
 
-\section{Figures}
-\begin{figure}[h!]\centering
-\includegraphics[width=0.95\linewidth]{fig1_timeseries.png}
-\caption{Noisy data with injected chirp (unit-energy template scaled by an amplitude) overlaid.}
-\end{figure}
-
-\begin{figure}[h!]\centering
-\includegraphics[width=0.95\linewidth]{fig2_correlation.png}
-\caption{Matched-filter output (toy correlation) vs.\ time. The dashed line marks the peak (estimated arrival time).}
-\end{figure}
-
-\begin{figure}[h!]\centering
-\includegraphics[width=0.95\linewidth]{fig3_residual_hist.png}
-\caption{Residual histogram with Gaussian fit. This is the operational meaning of ``Gaussian'': a bell-shaped distribution with predictable tails.}
-\end{figure}
-
 \begin{figure}[h!]\centering
 \includegraphics[width=0.95\linewidth]{fig4_spectrogram.png}
 \caption{Whitened, median-subtracted spectrogram using a long Hann window with 90\% overlap; color limits clipped to the 95th--99.5th percentiles.}
+\label{fig:spec}
 \end{figure}
 
+\section{Doing It: From Data to Detection}
+We compute the (toy) matched filter output and identify the peak as the estimated arrival time, while the whitened, median-subtracted spectrogram highlights the rising-frequency pattern of the hidden chirp.
+
+\section{From Toy to Observatory: What We Simplified}
+Our toy omits engineering details: robust PSD tracking, whitening of very long records, banks of many templates, coherence across detectors, and false-alarm estimation via time shifts. The core ideas, however, remain those expressed by Eqs.~\eqref{eq:h0}--\eqref{eq:stft}.
+
 \appendix
-\section*{Parameters}
-\noindent Table~\ref{tab:params} lists the parameters used in the experiment.
+\section*{Appendix A: Parameters}
+\noindent The experiment parameters used in the figures are collected in Table~\ref{tab:params}.
 \begin{table}[h!]\centering
 \caption{Parameters of the toy experiment.}
 \label{tab:params}
 \input{parameters.tex}
 \end{table}
+
+\section*{Appendix B: Reproducibility Notes}
+Upload this \LaTeX{} file with the images and \texttt{parameters.tex} to Overleaf. The Python code that generated the figures is available separately.
 
 \end{document}

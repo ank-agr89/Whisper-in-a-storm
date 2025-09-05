@@ -7,95 +7,127 @@ Original file is located at
     https://colab.research.google.com/drive/1c3novEN96wKkS9OVnq-hN3aXD4TFojXt
 """
 
-# --- Toy LIGO-style matched filtering: Colab-safe build (no caas_jupyter_tools) ---
-import os, textwrap
+import os, shutil, subprocess, textwrap
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import chirp, correlate, welch, stft
 from scipy.stats import norm
 
+# -------------------------
 # 0) Output folder
+# -------------------------
 out_dir = "./"
 os.makedirs(out_dir, exist_ok=True)
 
-# 1) Synthetic data
+# -------------------------
+# 1) Generate synthetic data
+# -------------------------
 np.random.seed(42)
-fs = 4096.0
-duration = 1.0
+fs = 4096.0              # Hz
+duration = 1.0           # s
 t = np.linspace(0, duration, int(fs*duration), endpoint=False)
-f0, f1 = 30.0, 300.0
-signal_amplitude, noise_std = 0.5, 0.5
+f0, f1 = 30.0, 300.0     # start/end chirp freq (Hz)
+signal_amplitude = 0.5
+noise_std = 0.5
 
+# Template (unit-energy chirp)
 template = chirp(t, f0=f0, f1=f1, t1=duration, method='linear')
 template = template - template.mean()
 template = template / np.sqrt(np.sum(template**2))
 
-true_signal = signal_amplitude * template
-noise = noise_std * np.random.randn(len(t))
-data = true_signal + noise
+# Build signals
+signal_only = signal_amplitude * template
+noise_only = noise_std * np.random.randn(len(t))
+signal_plus_noise = signal_only + noise_only
 
-# 2) Figures: time series, matched-filter, residuals
-plt.figure(figsize=(10,4))
-plt.plot(t, data, label="Noisy data")
-plt.plot(t, true_signal, label="Injected signal", alpha=0.8)
+# Residuals (data - signal) for Gaussianity check
+residual = signal_plus_noise - signal_only
+mu_hat, sigma_hat = float(np.mean(residual)), float(np.std(residual))
+
+# -------------------------
+# 2) Figures (FOUR total)
+# -------------------------
+
+# Fig 1: Signal-only vs Noise-only vs Signal+Noise (single plot, three traces)
+plt.figure(figsize=(10, 4))
+plt.plot(t, signal_only, label="Signal-only", alpha=0.95, linewidth=1.2)
+plt.plot(t, noise_only, label="Noise-only", alpha=0.7, linewidth=1.0)
+plt.plot(t, signal_plus_noise, label="Signal + Noise", alpha=0.9, linewidth=1.0)
 plt.xlabel("Time (s)"); plt.ylabel("Strain (arb. units)")
-plt.title("Noisy data with injected gravitational-wave-like signal")
-plt.legend(); plt.tight_layout()
-plt.savefig(os.path.join(out_dir, "fig1_timeseries.png"), dpi=200); plt.close()
+plt.title("Signal vs Noise vs Signal+Noise")
+plt.legend(loc="upper right")
+plt.tight_layout()
+fig1_path = os.path.join(out_dir, "fig1_signal_vs_noise.png")
+plt.savefig(fig1_path, dpi=200); plt.close()
 
-corr = correlate(data, template, mode='same')
+# Fig 2: Matched filter (toy, cross-correlation with template)
+corr = correlate(signal_plus_noise, template, mode='same')
 max_idx = int(np.argmax(corr))
 estimated_time = t[max_idx]
-snr = corr[max_idx] / np.std(corr)
+snr_approx = corr[max_idx] / np.std(corr)
 
-plt.figure(figsize=(10,4))
+plt.figure(figsize=(10, 4))
 plt.plot(t, corr, label="Matched filter output")
 plt.axvline(estimated_time, linestyle="--", label="Estimated signal time")
 plt.xlabel("Time (s)"); plt.ylabel("Correlation (arb. units)")
 plt.title("Matched filter output (cross-correlation)")
-plt.legend(); plt.tight_layout()
-plt.savefig(os.path.join(out_dir, "fig2_correlation.png"), dpi=200); plt.close()
+plt.legend()
+plt.tight_layout()
+fig2_path = os.path.join(out_dir, "fig2_correlation.png")
+plt.savefig(fig2_path, dpi=200); plt.close()
 
-residual = data - true_signal
-mu_hat, sigma_hat = float(np.mean(residual)), float(np.std(residual))
-plt.figure(figsize=(10,4))
+# Fig 3: Residuals histogram with Gaussian fit
+plt.figure(figsize=(10, 4))
 plt.hist(residual, bins=60, density=True, alpha=0.7, label="Residual histogram")
-x = np.linspace(residual.min(), residual.max(), 400)
+x = np.linspace(residual.min(), residual.max(), 500)
 plt.plot(x, norm.pdf(x, mu_hat, sigma_hat), label=f"Gaussian fit (μ={mu_hat:.3f}, σ={sigma_hat:.3f})")
 plt.xlabel("Residual amplitude"); plt.ylabel("Density")
 plt.title("Residuals distribution and Gaussian fit")
-plt.legend(); plt.tight_layout()
-plt.savefig(os.path.join(out_dir, "fig3_residual_hist.png"), dpi=200); plt.close()
+plt.legend()
+plt.tight_layout()
+fig3_path = os.path.join(out_dir, "fig3_residual_hist.png")
+plt.savefig(fig3_path, dpi=200); plt.close()
 
-# 3) Whiten + median-subtracted STFT, long window, high overlap, contrast clipped
+# Fig 4: Whitened, median-subtracted spectrogram (long window, high overlap), contrast-clipped
+
 def whiten_time_series(x, fs, nperseg=1024):
+    """Frequency-domain whitening using Welch PSD estimate."""
     f_psd, psd = welch(x, fs=fs, nperseg=nperseg)
     psd = np.maximum(psd, 1e-12)
     X = np.fft.rfft(x)
     f_fft = np.fft.rfftfreq(len(x), d=1.0/fs)
     asd = np.sqrt(np.interp(f_fft, f_psd, psd))
     asd = np.maximum(asd, 1e-12)
-    return np.fft.irfft(X / asd, n=len(x))
+    xw = np.fft.irfft(X / asd, n=len(x))
+    return xw
 
-whitened = whiten_time_series(data, fs=fs, nperseg=1024)
-f_stft, tau_stft, Zxx = stft(
-    whitened, fs=fs, window='hann',
-    nperseg=1024, noverlap=int(0.9*1024), nfft=1024, boundary=None
-)
+whitened = whiten_time_series(signal_plus_noise, fs=fs, nperseg=1024)
+
+# STFT: longer window, high overlap (~90%), Hann window
+nperseg = 1024
+noverlap = int(0.9 * nperseg)
+f_stft, tau_stft, Zxx = stft(whitened, fs=fs, window='hann', nperseg=nperseg,
+                             noverlap=noverlap, nfft=nperseg, boundary=None)
+# Power -> dB
 Sxx = np.abs(Zxx)**2
-Sxx_db = 10*np.log10(Sxx + 1e-12)
+Sxx_db = 10.0 * np.log10(Sxx + 1e-12)
+# Median subtraction across time per frequency
 Sxx_db_ms = Sxx_db - np.median(Sxx_db, axis=1, keepdims=True)
+# Contrast stretch (95th to 99.5th percentiles)
+vmin, vmax = np.percentile(Sxx_db_ms, 95.0), np.percentile(Sxx_db_ms, 99.5)
 
-lo, hi = np.percentile(Sxx_db_ms, 95.0), np.percentile(Sxx_db_ms, 99.5)
-plt.figure(figsize=(10,4))
-plt.pcolormesh(tau_stft, f_stft, Sxx_db_ms, shading='gouraud', vmin=lo, vmax=hi)
+plt.figure(figsize=(10, 4))
+plt.pcolormesh(tau_stft, f_stft, Sxx_db_ms, shading='gouraud', vmin=vmin, vmax=vmax)
 plt.xlabel("Time (s)"); plt.ylabel("Frequency (Hz)")
 plt.title("Whitened, median-subtracted spectrogram (long window, high overlap)")
 plt.tight_layout()
-plt.savefig(os.path.join(out_dir, "fig4_spectrogram.png"), dpi=200); plt.close()
+fig4_path = os.path.join(out_dir, "fig4_spectrogram.png")
+plt.savefig(fig4_path, dpi=200); plt.close()
 
-# 4) parameters.tex and CSV
+# -------------------------
+# 3) Parameters table + CSV (optional)
+# -------------------------
 params = [
     ("Sampling rate", f"{fs:.0f} Hz"),
     ("Duration", f"{duration:.2f} s"),
@@ -104,18 +136,28 @@ params = [
     ("Signal amplitude", f"{signal_amplitude:.2f}"),
     ("Noise std. dev.", f"{noise_std:.2f}"),
     ("Estimated arrival time", f"{estimated_time:.4f} s"),
-    ("Approx. SNR (toy)", f"{snr:.2f}"),
+    ("Approx. SNR (toy)", f"{snr_approx:.2f}"),
     ("Residual μ, σ", f"{mu_hat:.3f}, {sigma_hat:.3f}"),
 ]
 params_tex = "\\begin{tabular}{ll}\n\\toprule\nParameter & Value \\\\\n\\midrule\n"
-for k, v in params: params_tex += f"{k} & {v} \\\\\n"
+for k, v in params:
+    params_tex += f"{k} & {v} \\\\\n"
 params_tex += "\\bottomrule\n\\end{tabular}\n"
-open(os.path.join(out_dir, "parameters.tex"), "w").write(params_tex)
+with open(os.path.join(out_dir, "parameters.tex"), "w") as f:
+    f.write(params_tex)
 
-pd.DataFrame({"time_s": t, "data": data, "injected_signal": true_signal, "template": template}) \
-  .to_csv(os.path.join(out_dir, "timeseries.csv"), index=False)
+# Optional CSV
+pd.DataFrame({
+    "time_s": t,
+    "signal_only": signal_only,
+    "noise_only": noise_only,
+    "signal_plus_noise": signal_plus_noise,
+    "template_unit_energy": template
+}).to_csv(os.path.join(out_dir, "timeseries.csv"), index=False)
 
-# 5) LaTeX (modest title + numbered equations + spec description)
+# -------------------------
+# 4) LaTeX (7 sections, same title and structure)
+# -------------------------
 tex = r"""
 \documentclass[11pt,a4paper]{article}
 \usepackage[margin=1.1in]{geometry}
@@ -143,6 +185,15 @@ tex = r"""
 Gravitational waves are faint ripples in spacetime, so faint that even the most sensitive instruments see mostly noise. This document tells the story of how data analysis---especially matched filtering---turns noisy strain measurements into confident detections. We build a minimal, reproducible ``toy detector'': a synthetic chirp hidden inside random noise. We then recover it using the core idea of LIGO's searches, with clear intuition about ``Gaussian'' noise and why correlation is the right question to ask of the data.
 \end{abstract}
 
+\section{The Problem: Hearing a Pattern You Expect}
+Imagine a melody played once in a noisy room. If you know the melody in advance, you can ``listen for it.'' Matched filtering formalizes this idea. We assume we know the general shape of the signal we seek (a template); we slide that template across the data and measure how well they line up at every time. Where alignment is best, the template ``rings,'' producing a peak in a detection statistic.
+
+\begin{figure}[h!]\centering
+\includegraphics[width=0.95\linewidth]{fig1_signal_vs_noise.png}
+\caption{Signal-only, noise-only, and signal+noise, over the same time span. Seeing all three clarifies the challenge: the signal is faint and structured, the noise is random, and real data are their sum.}
+\label{fig:signalvnoise}
+\end{figure}
+
 \section{Generative Model and Hypotheses}
 We model the observed strain $d(t)$ as either noise alone or noise plus a signal:
 \begin{align}
@@ -165,6 +216,21 @@ h_\tau(t) \equiv h(t-\tau). \label{eq:snr}
 \end{equation}
 Peaks of $\rho(\tau)$ indicate times where $d$ contains $h$ most strongly, with \eqref{eq:inner} downweighting noisy bands.
 
+\begin{figure}[h!]\centering
+\includegraphics[width=0.95\linewidth]{fig2_correlation.png}
+\caption{Matched-filter output (toy correlation) vs.\ time. The dashed line marks the peak (estimated arrival time).}
+\label{fig:corr}
+\end{figure}
+
+\section{What ``Gaussian Noise'' Really Means}
+``Gaussian'' is about a \emph{shape} that randomness tends to take. A process is Gaussian when any linear combination of samples is normally distributed; empirically, histograms of noise-only samples form a bell-shaped curve. In practice, this means averages and correlations are predictable: the central limit effect makes extreme fluctuations rare and typical fluctuations well-characterized by a mean and standard deviation.
+
+\begin{figure}[h!]\centering
+\includegraphics[width=0.95\linewidth]{fig3_residual_hist.png}
+\caption{Residual histogram with Gaussian fit. This is the operational meaning of ``Gaussian'': a bell-shaped distribution with predictable tails.}
+\label{fig:hist}
+\end{figure}
+
 \section{Whitening and Spectrograms}
 To visualize features and approximate the weighting in \eqref{eq:inner}, we whiten the data:
 \begin{equation}
@@ -182,38 +248,57 @@ S_{\mathrm{dB}}^{\mathrm{ms}}(t_k,f_m) \equiv 10\log_{10}\!\big(|Z|^2\big)
 \end{equation}
 Finally, we clip color limits to the $95$th--$99.5$th percentiles of $S_{\mathrm{dB}}^{\mathrm{ms}}$ to enhance contrast.
 
-\section{Figures}
-\begin{figure}[h!]\centering
-\includegraphics[width=0.95\linewidth]{fig1_timeseries.png}
-\caption{Noisy data with injected chirp (unit-energy template scaled by an amplitude) overlaid.}
-\end{figure}
-
-\begin{figure}[h!]\centering
-\includegraphics[width=0.95\linewidth]{fig2_correlation.png}
-\caption{Matched-filter output (toy correlation) vs.\ time. The dashed line marks the peak (estimated arrival time).}
-\end{figure}
-
-\begin{figure}[h!]\centering
-\includegraphics[width=0.95\linewidth]{fig3_residual_hist.png}
-\caption{Residual histogram with Gaussian fit. This is the operational meaning of ``Gaussian'': a bell-shaped distribution with predictable tails.}
-\end{figure}
-
 \begin{figure}[h!]\centering
 \includegraphics[width=0.95\linewidth]{fig4_spectrogram.png}
 \caption{Whitened, median-subtracted spectrogram using a long Hann window with 90\% overlap; color limits clipped to the 95th--99.5th percentiles.}
+\label{fig:spec}
 \end{figure}
 
+\section{Doing It: From Data to Detection}
+We compute the (toy) matched filter output and identify the peak as the estimated arrival time, while the whitened, median-subtracted spectrogram highlights the rising-frequency pattern of the hidden chirp.
+
+\section{From Toy to Observatory: What We Simplified}
+Our toy omits engineering details: robust PSD tracking, whitening of very long records, banks of many templates, coherence across detectors, and false-alarm estimation via time shifts. The core ideas, however, remain those expressed by Eqs.~\eqref{eq:h0}--\eqref{eq:stft}.
+
 \appendix
-\section*{Parameters}
-\noindent Table~\ref{tab:params} lists the parameters used in the experiment.
+\section*{Appendix A: Parameters}
+\noindent The experiment parameters used in the figures are collected in Table~\ref{tab:params}.
 \begin{table}[h!]\centering
 \caption{Parameters of the toy experiment.}
 \label{tab:params}
 \input{parameters.tex}
 \end{table}
 
+\section*{Appendix B: Reproducibility Notes}
+Upload this \LaTeX{} file with the images and \texttt{parameters.tex} to Overleaf. The Python code that generated the figures is available separately.
+
 \end{document}
 """
-open(os.path.join(out_dir, "ligo_toy_matched_filter.tex"), "w").write(tex)
+tex_path = os.path.join(out_dir, "ligo_toy_matched_filter.tex")
+with open(tex_path, "w") as f:
+    f.write(tex)
 
-print("Done. Upload the contents of ./outputs to Overleaf.")
+# -------------------------
+# 5) Try to compile to PDF (if pdflatex available)
+# -------------------------
+pdf_path = os.path.join(out_dir, "ligo_toy_matched_filter.pdf")
+pdflatex = shutil.which("pdflatex")
+compiled = False
+if pdflatex is not None:
+    try:
+        # run twice for references
+        for _ in range(2):
+            subprocess.run(
+                [pdflatex, "-interaction=nonstopmode", "-halt-on-error", os.path.basename(tex_path)],
+                cwd=out_dir, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+        compiled = os.path.exists(pdf_path)
+    except subprocess.CalledProcessError as e:
+        compiled = False
+
+# -------------------------
+# 6) Report
+# -------------------------
+print("Wrote LaTeX + figures to:", os.path.abspath(out_dir))
+print("PDF compiled:", compiled)
+print("Files:", sorted(os.listdir(out_dir)))
